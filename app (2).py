@@ -1,19 +1,17 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
 @st.cache_data
-def load_and_merge_data():
+def load_and_analyze():
     file_id = "1cy7xHNrdkRiMqZph3zOUgC7LsXppAedk"
     url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
-    # 모든 시트를 딕셔너리로 로드
     sheets = pd.read_excel(url, sheet_name=None)
     
+    # 1. 시트 로드
     df_raw = sheets['출고데이터 로우']
-    # '휴젤거래처' 시트가 없으면 빈 데이터프레임 생성
     df_hugel = sheets.get('휴젤거래처', pd.DataFrame(columns=['거래처명']))
     
-    # 데이터 정제
+    # 2. 전처리 (부가세/날짜/숫자)
     df_raw['매출일자'] = pd.to_datetime(df_raw['매출일자'])
     df_raw['연도'] = df_raw['매출일자'].dt.year
     df_raw['월'] = df_raw['매출일자'].dt.month
@@ -22,78 +20,75 @@ def load_and_merge_data():
     return df_raw, df_hugel
 
 try:
-    df, df_hugel = load_and_merge_data()
-    st.title("📊 2026 제휴사별 통합 전략 분석 (Error Fixed)")
+    df, df_hugel = load_and_analyze()
+    st.title("🚀 제휴사별 정밀 영업 전략 분석")
 
-    # --- [항목 1, 2, 3] 달성률 및 전년 대비 ---
-    st.header("📍 1-3. 제휴사별 매출 성과 및 성장률")
-    summary = df.groupby(['제휴사', '연도'])['공급가액'].sum().unstack().fillna(0)
-    
-    # 2025년 데이터가 없는 경우를 위한 컬럼 체크
-    if 2025 not in summary.columns: summary[2025] = 0
-    if 2026 not in summary.columns: summary[2026] = 0
-    
-    summary.columns = ['2025년 매출', '2026년 매출']
-    # 0으로 나누기 방지 로직 추가
-    summary['성장률(%)'] = summary.apply(lambda x: ((x['2026년 매출'] - x['2025년 매출']) / x['2025년 매출'] * 100) if x['2025년 매출'] > 0 else 0, axis=1).round(1)
-    st.table(summary.reset_index())
+    # --- 1~4. 제휴사별 통합 분석 ---
+    st.header("📍 1-4. 제휴사별 성과 (년/월/과/지역)")
+    for partner in df['제휴사'].unique():
+        with st.expander(f"🏢 {partner} 상세 분석"):
+            p_df = df[df['제휴사'] == partner]
+            # 년/월 매출
+            perf = p_df.groupby(['연도', '월'])['공급가액'].sum().unstack(level=0).fillna(0)
+            st.subheader(f"{partner} 전년대비/시즌 매출 현황")
+            st.table(perf)
+            
+            # 진료과/지역별
+            c1, c2 = st.columns(2)
+            c1.write("Top 지역")
+            c1.table(p_df.groupby('지역')['공급가액'].sum().nlargest(5))
+            c2.write("Top 진료과")
+            c2.table(p_df.groupby('진료과')['공급가액'].sum().nlargest(5))
 
-    # --- [항목 4] 진료과별/지역별 ---
-    st.header("📍 4. 26년 진료과/지역별 매출 현황")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("지역별 TOP 10")
-        st.table(df[df['연도'] == 2026].groupby('지역')['공급가액'].sum().reset_index().sort_values(by='공급가액', ascending=False).head(10))
-    with col2:
-        st.subheader("진료과별 매출")
-        st.table(df[df['연도'] == 2026].groupby('진료과')['공급가액'].sum().reset_index().sort_values(by='공급가액', ascending=False))
-
-    # --- [항목 8] 뉴메코(메디톡스) 상세 분석 ---
-    st.header("📍 8. 뉴메코(메디톡스) 심층 분석")
+    # --- 8. 뉴메코(메디톡스) 집중 분석 ---
+    st.header("📍 8. 뉴메코(메디톡스) 전략 분석")
     nm_df = df[df['제휴사'] == '뉴메코']
     
-    # 8-1. 휴젤 거래처 비교 (시트 대조)
-    hugel_clients = set(df_hugel['거래처명'].unique())
-    nm_clients = set(nm_df['거래처명'].unique())
-    intersection = nm_clients.intersection(hugel_clients)
+    # (1) 휴젤 직거래처 구매 전환 분석
+    hugel_list = set(df_hugel['거래처명'].unique())
+    nm_buy_hugel = nm_df[nm_df['거래처명'].isin(hugel_list)]
     
-    # 8-2. 코어톡스 100개 이상 VIP 증감
-    core_df = nm_df[nm_df['제품명 변환'].str.contains('코어톡스', na=False)]
+    # (2) 코어톡스 수익성 분석 (매입가 31,500 -> 30,000 변동 반영)
+    # 매입가는 부가세 포함이므로 / 1.1 해서 공급가 기준으로 계산
+    core_df = nm_df[nm_df['제품명 변환'].str.contains('코어톡스', na=False)].copy()
+    
+    def calc_profit(row):
+        # 2월 2일 기준 매입가 변동 (부가세 제외로 환산)
+        cost_pre = 31500 / 1.1
+        cost_post = 30000 / 1.1
+        current_cost = cost_post if row['매출일자'] >= pd.Timestamp('2026-02-02') else cost_pre
+        return (row['단가'] - current_cost) * row['수량']
+
+    core_df['수익'] = core_df.apply(calc_profit, axis=1)
+    profit_increase = core_df[core_df['매출일자'] >= pd.Timestamp('2026-02-02')]['수익'].sum()
+
+    # (3) 코어톡스 33,000원 100개 이상 업체 증감
     vip_25 = core_df[(core_df['연도'] == 2025) & (core_df['수량'] >= 100)]['거래처명'].nunique()
     vip_26 = core_df[(core_df['연도'] == 2026) & (core_df['수량'] >= 100)]['거래처명'].nunique()
 
-    col3, col4 = st.columns(2)
-    with col3:
-        st.subheader("📋 휴젤 거래처 내 침투율")
-        st.table(pd.DataFrame({
-            "항목": ["휴젤+메디톡스 병행", "메디톡스 전용", "휴젤 전용"],
-            "거래처 수": [len(intersection), len(nm_clients - hugel_clients), len(hugel_clients - nm_clients)]
-        }))
-    with col4:
-        st.subheader("📋 코어톡스 100개↑ VIP 업체 증감")
-        st.table(pd.DataFrame({
-            "연도": ["2025년", "2026년"],
-            "VIP 업체수": [vip_25, vip_26],
-            "증감": ["-", f"+{vip_26 - vip_25}"]
-        }))
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("📋 휴젤 직거래처 -> 뉴메코 전환")
+        st.write(f"휴젤 직거래처 중 뉴메코 구매 업체: **{nm_buy_hugel['거래처명'].nunique()}곳**")
+        st.write(f"해당 업체 총 매출액: {nm_buy_hugel['공급가액'].sum():,.0f}원")
+    with col2:
+        st.subheader("📋 코어톡스 단가/수익 분석")
+        st.write(f"2/2 매입가 인하 후 발생 수익: **{profit_increase:,.0f}원**")
+        st.write(f"100개↑ VIP 업체: 25년({vip_25}곳) → 26년({vip_26}곳)")
 
-    # --- [항목 9, 10] SKBS 및 로파마 ---
-    st.header("📍 9-10. SKBS 분석 및 로파마 스위칭")
-    col5, col6 = st.columns(2)
-    with col5:
-        st.subheader("SKBS 상위 품목 실적")
-        st.table(df[df['제휴사'] == 'SKBS'].groupby('제품명 변환')['공급가액'].sum().reset_index().sort_values(by='공급가액', ascending=False).head(5))
-    with col6:
-        st.subheader("로파마 아카리작스 도입 현황")
-        lo_raw = df[df['제휴사'] == '로파마']
-        total_lo = lo_raw['거래처명'].nunique()
-        akari_lo = lo_raw[lo_raw['제품명 변환'].str.contains('아카리작스', na=False)]['거래처명'].nunique()
-        
-        # 0으로 나누기 방지
-        switch_rate = (akari_lo / total_lo * 100) if total_lo > 0 else 0
-        st.write(f"로파마 전체 {total_lo}곳 중 {akari_lo}곳 도입 완료")
-        st.progress(switch_rate / 100)
-        st.info(f"현재 스위칭 비율: {switch_rate:.1f}%")
+    # --- 9. SKBS & 10. 로파마 ---
+    st.header("📍 9-10. SKBS & 로파마 스위칭 분석")
+    
+    # 로파마 스위칭 (아카리작스 -> 라이스정)
+    lo_df = df[df['제휴사'] == '로파마']
+    akari_buyers = set(lo_df[lo_df['제품명 변환'].str.contains('아카리작스', na=False)]['거래처명'].unique())
+    rice_buyers = set(lo_df[lo_df['제품명 변환'].str.contains('라이스정', na=False)]['거래처명'].unique())
+    switched = akari_buyers.intersection(rice_buyers)
+
+    st.subheader("로파마 아카리작스 -> 라이스정 전환 현황")
+    st.write(f"아카리작스 구매처: {len(akari_buyers)}곳")
+    st.write(f"라이스정으로 전환(병행)된 곳: {len(switched)}곳")
+    st.write(f"미전환 업체 수: {len(akari_buyers - rice_buyers)}곳")
 
 except Exception as e:
-    st.error(f"분석 중 오류 발생: {e}")
+    st.error(f"데이터 연산 오류: {e}")
